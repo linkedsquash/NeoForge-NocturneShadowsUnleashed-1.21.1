@@ -11,11 +11,12 @@ public class WhipPhysics {
     private static final int SEGMENTS = 16;
     private static final int CONSTRAINT_ITERATIONS = 12;
     private static final double GRAVITY = 0.015;
-    private static final double DAMPING = 0.94;
+    private static final double DAMPING = 0.94; // Retains visible follow-through while settling oscillation faster.
 
     private final WhipEntity whip;
     private final List<Vec3> currentPositions = new ArrayList<>(SEGMENTS + 1);
     private final List<Vec3> previousPositions = new ArrayList<>(SEGMENTS + 1);
+    // The rope pays out as the tip travels and reels in while the tip returns.
     private Vec3 lastTipPosition;
     private double deployedLength;
 
@@ -44,13 +45,17 @@ public class WhipPhysics {
         double endpointDistance = start.distanceTo(end);
         double tipTravel = lastTipPosition.distanceTo(end);
 
+        // Track rope paid out independently from straight-line distance so it can sag while slack.
         if (whip.getCurrentState() == WhipEntity.WhipEntityState.RETRACTING) {
             deployedLength = Math.max(endpointDistance, deployedLength - tipTravel);
-        } else {
+        } else if (whip.getCurrentState() != WhipEntity.WhipEntityState.DROPPING) {
             deployedLength = Math.max(
                     endpointDistance,
                     Math.min(WhipEntity.MAX_REACH, deployedLength + tipTravel)
             );
+        } else {
+            // A falling tip still has rope deployed, so preserve its slack until it begins retracting.
+            deployedLength = Math.max(endpointDistance, deployedLength);
         }
         lastTipPosition = end;
 
@@ -59,6 +64,7 @@ public class WhipPhysics {
         currentPositions.set(SEGMENTS, end);
 
         // Verlet integration: new position = current + damped velocity + acceleration.
+        // Gravity scales with slack, so a taut rope stays straight while excess deployed length sags.
         double slack = Math.max(0.0, deployedLength - endpointDistance);
         double gravityScale = deployedLength < 1.0E-8 ? 0.0 : Math.min(1.0, slack / deployedLength);
         double restLength = Math.max(endpointDistance, deployedLength) / SEGMENTS;
@@ -72,7 +78,7 @@ public class WhipPhysics {
             currentPositions.set(i, current.add(velocity).add(0, -GRAVITY * gravityScale, 0));
         }
 
-        // Keep endpoints fixed while enforcing segment lengths.
+        // Repeatedly enforce the deployed rope length to stiffen the silhouette without removing all lag.
         for (int iteration = 0; iteration < CONSTRAINT_ITERATIONS; iteration++) {
             currentPositions.set(0, start);
             currentPositions.set(SEGMENTS, end);

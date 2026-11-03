@@ -58,6 +58,7 @@ public class WhipItem extends Item{
         else
         {
             if (!level.isClientSide){
+                // Use the vanilla sweep whoosh for the launch instead of the unrelated amethyst chime.
                 level.playSound(                //plays a different sound when the interaction is completed
 
                     null,

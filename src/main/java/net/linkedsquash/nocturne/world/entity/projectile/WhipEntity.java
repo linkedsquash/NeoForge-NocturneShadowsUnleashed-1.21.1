@@ -44,7 +44,7 @@ public class WhipEntity extends Projectile {
     //checks if the whip has been discarded
     public boolean isDiscarded = false;
 
-    // returns true when the sweep attack is held
+    // Synchronize held-sweep mode so client movement and rendering follow the server's attack state.
     private static final EntityDataAccessor<Boolean> DATA_SWEEPING =
             SynchedEntityData.defineId(WhipEntity.class, EntityDataSerializers.BOOLEAN);
 
@@ -58,14 +58,24 @@ public class WhipEntity extends Projectile {
     private static final double SWEEP_MAX_SPEED = 2.5;
     private static final double SWEEP_ACCELERATION = 1.0;
     private static final double SWEEP_ARRIVAL_SPEED_FACTOR = 0.75;
-    private static final double LASH_GRAVITY = 0.025;
+    // Vertical steering is gentler than horizontal steering so aim changes do not make the tip pop up or down.
+    private static final double SWEEP_VERTICAL_ARRIVAL_SPEED_FACTOR = 0.2;
+    // Applied after movement, preserving the first launch step while bending later flight downward.
+    private static final double LASH_GRAVITY = 0.08;
     private static final double AIR_DRAG = 0.99;
     private static final double WATER_DRAG = 0.55;
+    // Squared speed cutoff (0.1 blocks/tick) used to let a nearly stopped tip fall and settle.
+    private static final double MIN_FLIGHT_MOMENTUM_SQR = 0.01;
+    // A held sweep can leave DROPPING once its 8-block aim target moves by more than 0.05 blocks.
+    private static final double SWEEP_RESTART_AIM_MOVEMENT_SQR = 0.0025;
+    // Successful sweep hits are rate-limited per target, allowing one sweep to keep crossing other entities.
     private final Map<UUID, Long> lastSweepHitTick = new HashMap<>();
 
 
     @Nullable
     private Vec3 previousSweepLookAngle;
+    @Nullable
+    private Vec3 previousSweepTargetPosition;
     private long previousSweepTick;
 
     public float sweepDamage = 4F;
@@ -225,6 +235,25 @@ public class WhipEntity extends Projectile {
             this.setDeltaMovement(velocity.add(0.0, -LASH_GRAVITY, 0.0));
         }
 
+        // DROPPING retains the whip entity and its rope so a later held sweep can steer it again.
+        private void beginDropping() {
+            setCurrentState(WhipEntityState.DROPPING);
+        }
+
+        // Compare the player's current reach target with the previous one to detect renewed sweep input.
+        private boolean hasSweepAimMoved(Player player) {
+            Vec3 targetPosition = player.getEyePosition().add(player.getLookAngle().scale(MAX_REACH));
+            if (previousSweepTargetPosition == null) {
+                previousSweepTargetPosition = targetPosition;
+                return false;
+            }
+
+            boolean moved = previousSweepTargetPosition.distanceToSqr(targetPosition)
+                    > SWEEP_RESTART_AIM_MOVEMENT_SQR;
+            previousSweepTargetPosition = targetPosition;
+            return moved;
+        }
+
         @Override
         protected void defineSynchedData (SynchedEntityData.Builder builder){
             // Register the state before getCurrentState() or setCurrentState() accesses it.
@@ -244,18 +273,50 @@ public class WhipEntity extends Projectile {
             }
             boolean extending = getCurrentState() == WhipEntityState.EXTENDING;
             boolean sweeping = isSweepHeld();
+            boolean dropping = getCurrentState() == WhipEntityState.DROPPING;
 
-            // Apply the same mild projectile arc on both sides; only the server resolves hits.
-            if (extending && !sweeping) {
-                applyLashForces();
-                if (!this.level().isClientSide) {
-                    this.checkCollision();
-                }
+            // Check the current lash path before adding forces; this keeps the initial launch velocity intact.
+            if (!this.level().isClientSide && extending && !sweeping) {
+                this.checkCollision();
             }
-            if (!this.level().isClientSide && sweeping && extending) {
-                updateSweep(player);
+            boolean sweepAimMoved = dropping && sweeping && hasSweepAimMoved(player);
+            boolean guidedSweep = sweeping && (extending || (dropping && sweepAimMoved));
+            if (guidedSweep) {
+                if (!this.level().isClientSide && dropping && sweepAimMoved) {
+                    setCurrentState(WhipEntityState.EXTENDING);
+                }
+                if (!this.level().isClientSide) {
+                    updateSweep(player);
+                } else {
+                    this.move(MoverType.SELF, this.getDeltaMovement());
+                }
             } else {
+                if (dropping) {
+                    if (this.onGround()) {
+                        // Stop ground jitter, but keep DROPPING so a moved sweep aim can restart the tip.
+                        this.setDeltaMovement(Vec3.ZERO);
+                    } else {
+                        // A stopped airborne tip continues to fall until it lands.
+                        applyLashForces();
+                    }
+                }
                 this.move(MoverType.SELF, this.getDeltaMovement()); // Move the tip using its current velocity.
+            }
+            if (getCurrentState() == WhipEntityState.DROPPING && this.onGround() && !guidedSweep) {
+                this.setDeltaMovement(Vec3.ZERO);
+            }
+
+            // Apply forces after movement so the launch step remains unchanged and later ticks form a projectile arc.
+            if (extending && !sweeping && getCurrentState() == WhipEntityState.EXTENDING) {
+                applyLashForces();
+            }
+
+            // Only enter the falling state after motion is nearly exhausted; moving the held sweep aim can revive it.
+            if (!this.level().isClientSide
+                    && getCurrentState() == WhipEntityState.EXTENDING
+                    && this.getDeltaMovement().lengthSqr() <= MIN_FLIGHT_MOMENTUM_SQR
+                    && !(guidedSweep && sweepAimMoved)) {
+                beginDropping();
             }
 
             if (!this.level().isClientSide) {
@@ -294,21 +355,36 @@ public class WhipEntity extends Projectile {
         private void updateSweep (Player player){
             Vec3 previousPosition = this.position();
             Vec3 targetPosition = player.getEyePosition().add(player.getLookAngle().scale(MAX_REACH));
+            previousSweepTargetPosition = targetPosition;
             Vec3 toTarget = targetPosition.subtract(previousPosition);
-            double distance = toTarget.length();
-            double desiredSpeed = Math.min(SWEEP_MAX_SPEED, distance * SWEEP_ARRIVAL_SPEED_FACTOR);
-            Vec3 desiredVelocity = distance < 1.0E-6
+            // Steer horizontally toward the live aim while using a lower vertical response for controlled arcs.
+            Vec3 horizontalToTarget = new Vec3(toTarget.x, 0.0, toTarget.z);
+            double horizontalDistance = horizontalToTarget.length();
+            double horizontalSpeed = Math.min(
+                    SWEEP_MAX_SPEED,
+                    horizontalDistance * SWEEP_ARRIVAL_SPEED_FACTOR
+            );
+            Vec3 horizontalVelocity = horizontalDistance < 1.0E-6
                     ? Vec3.ZERO
-                    : toTarget.scale(desiredSpeed / distance);
+                    : horizontalToTarget.scale(horizontalSpeed / horizontalDistance);
+            double verticalSpeed = Mth.clamp(
+                    toTarget.y * SWEEP_VERTICAL_ARRIVAL_SPEED_FACTOR,
+                    -SWEEP_MAX_SPEED,
+                    SWEEP_MAX_SPEED
+            );
+            Vec3 desiredVelocity = new Vec3(horizontalVelocity.x, verticalSpeed, horizontalVelocity.z);
             Vec3 velocity = getDeltaMovement();
             Vec3 velocityChange = desiredVelocity.subtract(velocity);
 
+            // Accelerate toward live aim over several ticks instead of snapping the tip to each new target.
             if (velocityChange.lengthSqr() > SWEEP_ACCELERATION * SWEEP_ACCELERATION) {
                 velocity = velocity.add(velocityChange.normalize().scale(SWEEP_ACCELERATION));
             } else {
                 velocity = desiredVelocity;
             }
 
+            // Gravity also bends the guided sweep; clamp afterward so steering and gravity respect the same speed cap.
+            velocity = velocity.add(0.0, -LASH_GRAVITY, 0.0);
             if (velocity.lengthSqr() > SWEEP_MAX_SPEED * SWEEP_MAX_SPEED) {
                 velocity = velocity.normalize().scale(SWEEP_MAX_SPEED);
             }
@@ -332,6 +408,8 @@ public class WhipEntity extends Projectile {
 
             var searchBox = new net.minecraft.world.phys.AABB(previousPosition, currentPosition).inflate(1.0);
 
+            // Test the tip's traveled segment. Per-UUID cooldowns prevent repeat hits without ending the sweep,
+            // and deliberately continuing the loop allows one sweep step to hit multiple different targets.
             for (LivingEntity target : level().getEntitiesOfClass(LivingEntity.class, searchBox,
                     entity -> canHitEntity(entity))) {
                 boolean onPath = target.getBoundingBox().inflate(0.3).clip(previousPosition, currentPosition).isPresent();
@@ -355,6 +433,7 @@ public class WhipEntity extends Projectile {
         protected void onHitEntity (EntityHitResult hit){
             super.onHitEntity(hit);
             if (isSweepHeld()) return;
+            // A normal lash returns immediately after its first entity contact; held sweeps use the path loop above.
             this.setCurrentState(WhipEntityState.RETRACTING);
             Entity target = hit.getEntity();
             float damage = lashDamage;
@@ -399,6 +478,7 @@ public class WhipEntity extends Projectile {
     private void playHitFeedback(Entity target) {
         if (!(this.level() instanceof ServerLevel serverLevel)) return;
 
+        // Use vanilla hit cues only after damage succeeds, avoiding client/server duplicate effects and custom assets.
         double hitY = target.getY() + target.getBbHeight() * 0.55;
         serverLevel.playSound(
                 null,
@@ -447,8 +527,11 @@ public class WhipEntity extends Projectile {
 
         public void startSweep () {
             lastSweepHitTick.clear();
+            // Reset aim history so the new press starts cleanly, including when restarting from a dropped tip.
+            previousSweepTargetPosition = null;
             this.entityData.set(DATA_SWEEPING, true);
             setCurrentState(WhipEntityState.EXTENDING); // Keep the whip in its outbound state while sweeping.
+            // Play the same vanilla whoosh used for a normal lash when a held sweep begins.
             this.level().playSound(
                     null,
                     this.getX(),
@@ -475,7 +558,9 @@ public class WhipEntity extends Projectile {
             // Reserved state for a tip that is not extending or retracting.
             ONCOOLDOWN,
             //
-            HELD
+            HELD,
+            // The tip has nearly stopped; it falls to the ground but can resume when a held sweep aim moves.
+            DROPPING
         }
 
     }
