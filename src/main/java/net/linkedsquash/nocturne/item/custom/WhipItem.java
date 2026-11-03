@@ -64,10 +64,10 @@ public class WhipItem extends Item{
                     player.getX(),
                     player.getY(),
                     player.getZ(),
-                    SoundEvents.AMETHYST_BLOCK_CHIME,
-                    SoundSource.NEUTRAL,
-                    10f,
-                    0.4F /(level.getRandom().nextFloat() * 0.4F + 0.8F)); // adds a newly created entity on the server side and not the client
+                    SoundEvents.PLAYER_ATTACK_SWEEP,
+                    SoundSource.PLAYERS,
+                    0.8F,
+                    1.1F); // Adds the whip whoosh when the projectile is launched.
 
                 level.addFreshEntity(new WhipEntity(player ,level )); //The entity is constructed by new WhipEntity(player, level), and the world is then asked to add it. THIS IS WHERE THE WHIP ENTITY IS ACTUALLY CREATED
             }

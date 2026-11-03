@@ -4,7 +4,10 @@ package net.linkedsquash.nocturne.world.entity.projectile;
 import net.linkedsquash.nocturne.util.ModTags;
 import net.linkedsquash.nocturne.world.entity.ModEntities;
 import net.minecraft.nbt.CompoundTag;
-import net.minecraft.network.chat.Component;
+import net.minecraft.core.particles.ParticleTypes;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.sounds.SoundSource;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
@@ -42,7 +45,8 @@ public class WhipEntity extends Projectile {
     public boolean isDiscarded = false;
 
     // returns true when the sweep attack is held
-    public boolean sweepHeld;
+    private static final EntityDataAccessor<Boolean> DATA_SWEEPING =
+            SynchedEntityData.defineId(WhipEntity.class, EntityDataSerializers.BOOLEAN);
 
     // Shared key used to synchronise the whip state between the server and client.
     private static final EntityDataAccessor<Integer> DATA_STATE =
@@ -54,6 +58,9 @@ public class WhipEntity extends Projectile {
     private static final double SWEEP_MAX_SPEED = 2.5;
     private static final double SWEEP_ACCELERATION = 1.0;
     private static final double SWEEP_ARRIVAL_SPEED_FACTOR = 0.75;
+    private static final double LASH_GRAVITY = 0.025;
+    private static final double AIR_DRAG = 0.99;
+    private static final double WATER_DRAG = 0.55;
     private final Map<UUID, Long> lastSweepHitTick = new HashMap<>();
 
 
@@ -91,6 +98,10 @@ public class WhipEntity extends Projectile {
 
     public void setCurrentState(WhipEntityState state) {
         this.entityData.set(DATA_STATE, state.ordinal());
+    }
+
+    private boolean isSweepHeld() {
+        return this.entityData.get(DATA_SWEEPING);
     }
 
     public boolean checkRETRACTING() {
@@ -208,42 +219,17 @@ public class WhipEntity extends Projectile {
             return true;
         }
 
-        public void updateVelocity () {
-
-            Vec3 vec3 = this.getDeltaMovement();
-
-            //calculate projectile position
-            double X = this.getX();
-            double Y = this.getY();
-            double Z = this.getZ();
-
-            // Air drag
-            float drag = 0.99F;
-
-            //water drag
-            if (this.isInWater()) {
-                drag = 0.55F;
-            }
-
-            // Apply drag
-            this.setDeltaMovement(vec3.scale((double) drag));
-
-            // Apply gravity
-            if (sweepHeld) {
-                Vec3 vec34 = this.getDeltaMovement();
-                this.setDeltaMovement(
-                        vec34.x,
-                        vec34.y - 0.05F,
-                        vec34.z
-                );
-            }
-
+        private void applyLashForces() {
+            double drag = this.isInWater() ? WATER_DRAG : AIR_DRAG;
+            Vec3 velocity = this.getDeltaMovement().scale(drag);
+            this.setDeltaMovement(velocity.add(0.0, -LASH_GRAVITY, 0.0));
         }
 
         @Override
         protected void defineSynchedData (SynchedEntityData.Builder builder){
             // Register the state before getCurrentState() or setCurrentState() accesses it.
             builder.define(DATA_STATE, WhipEntityState.EXTENDING.ordinal());
+            builder.define(DATA_SWEEPING, false);
         }
 
         @Override
@@ -256,12 +242,17 @@ public class WhipEntity extends Projectile {
                 this.discardWhip();
                 return;
             }
-            // Collision callbacks can change state or damage entities, so run them
-            // only on the authoritative side and only while the tip is outbound.
-            if (!this.level().isClientSide && getCurrentState() == WhipEntityState.EXTENDING && !sweepHeld) {
-                this.checkCollision();
+            boolean extending = getCurrentState() == WhipEntityState.EXTENDING;
+            boolean sweeping = isSweepHeld();
+
+            // Apply the same mild projectile arc on both sides; only the server resolves hits.
+            if (extending && !sweeping) {
+                applyLashForces();
+                if (!this.level().isClientSide) {
+                    this.checkCollision();
+                }
             }
-            if (!this.level().isClientSide && sweepHeld && getCurrentState() == WhipEntityState.EXTENDING) {
+            if (!this.level().isClientSide && sweeping && extending) {
                 updateSweep(player);
             } else {
                 this.move(MoverType.SELF, this.getDeltaMovement()); // Move the tip using its current velocity.
@@ -271,7 +262,7 @@ public class WhipEntity extends Projectile {
                 Vec3 playerEyePosition = player.getEyePosition();
                 double distanceTravelled = this.position().distanceTo(spawnPosition);
 
-                if (!sweepHeld && getCurrentState() == WhipEntityState.EXTENDING && (distanceTravelled >= MAX_REACH
+                if (!isSweepHeld() && getCurrentState() == WhipEntityState.EXTENDING && (distanceTravelled >= MAX_REACH
                         || this.distanceToSqr(playerEyePosition) >= MAX_REACH * MAX_REACH)) {
                     setCurrentState(WhipEntityState.RETRACTING);
                 }
@@ -352,7 +343,7 @@ public class WhipEntity extends Projectile {
                 Mth.clamp(sweepDamage, sweepDamage, 40F);
                 float damage = (float) (sweepDamage + (angularVelocity * 20));
                 if (target.hurt(damageSources().playerAttack(player), damage)) {
-                    player.sendSystemMessage(Component.literal("Damage Amount: " + damage));
+                    playHitFeedback(target);
                     lastSweepHitTick.put(target.getUUID(), now);
                     damageWhip(player);
                 }
@@ -363,7 +354,7 @@ public class WhipEntity extends Projectile {
         @Override
         protected void onHitEntity (EntityHitResult hit){
             super.onHitEntity(hit);
-            if (sweepHeld) return;
+            if (isSweepHeld()) return;
             this.setCurrentState(WhipEntityState.RETRACTING);
             Entity target = hit.getEntity();
             float damage = lashDamage;
@@ -373,6 +364,7 @@ public class WhipEntity extends Projectile {
             if (playerOwner != null) {
                 DamageSource damageSource = this.damageSources().playerAttack(playerOwner);
                 if (target.hurt(damageSource, damage)) {
+                    playHitFeedback(target);
                     damageWhip(playerOwner);
                 }
             } else {
@@ -404,6 +396,33 @@ public class WhipEntity extends Projectile {
             return true;
         }
 
+    private void playHitFeedback(Entity target) {
+        if (!(this.level() instanceof ServerLevel serverLevel)) return;
+
+        double hitY = target.getY() + target.getBbHeight() * 0.55;
+        serverLevel.playSound(
+                null,
+                target.getX(),
+                hitY,
+                target.getZ(),
+                SoundEvents.PLAYER_ATTACK_CRIT,
+                SoundSource.PLAYERS,
+                0.8F,
+                1.15F
+        );
+        serverLevel.sendParticles(
+                ParticleTypes.CRIT,
+                target.getX(),
+                hitY,
+                target.getZ(),
+                4,
+                0.15,
+                0.2,
+                0.15,
+                0.02
+        );
+    }
+
     private void damageWhip(Player player) {
         ItemStack stack = player.getMainHandItem();
         InteractionHand hand = InteractionHand.MAIN_HAND;
@@ -428,12 +447,22 @@ public class WhipEntity extends Projectile {
 
         public void startSweep () {
             lastSweepHitTick.clear();
-            sweepHeld = true; // Remember that the server accepted the sweep behaviour.
+            this.entityData.set(DATA_SWEEPING, true);
             setCurrentState(WhipEntityState.EXTENDING); // Keep the whip in its outbound state while sweeping.
+            this.level().playSound(
+                    null,
+                    this.getX(),
+                    this.getY(),
+                    this.getZ(),
+                    SoundEvents.PLAYER_ATTACK_SWEEP,
+                    SoundSource.PLAYERS,
+                    0.8F,
+                    1.1F
+            );
         }
 
         public void releaseSweep () {
-            sweepHeld = false; // Stop the held sweep behaviour after a release request.
+            this.entityData.set(DATA_SWEEPING, false);
             setCurrentState(WhipEntityState.RETRACTING); // Tell the server-side entity to return to its owner.
         }
 

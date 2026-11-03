@@ -11,17 +11,21 @@ public class WhipPhysics {
     private static final int SEGMENTS = 16;
     private static final int CONSTRAINT_ITERATIONS = 12;
     private static final double GRAVITY = 0.015;
-    private static final double DAMPING = 0.96;
+    private static final double DAMPING = 0.94;
 
     private final WhipEntity whip;
     private final List<Vec3> currentPositions = new ArrayList<>(SEGMENTS + 1);
     private final List<Vec3> previousPositions = new ArrayList<>(SEGMENTS + 1);
+    private Vec3 lastTipPosition;
+    private double deployedLength;
 
     public WhipPhysics(WhipEntity whip) {
         this.whip = whip;
 
         Vec3 start = getHandPosition();
         Vec3 end = whip.position();
+        this.lastTipPosition = end;
+        this.deployedLength = Math.min(WhipEntity.MAX_REACH, start.distanceTo(end));
 
         for (int i = 0; i <= SEGMENTS; i++) {
             double t = i / (double) SEGMENTS;
@@ -37,24 +41,38 @@ public class WhipPhysics {
 
         Vec3 start = getHandPosition();
         Vec3 end = whip.position();
+        double endpointDistance = start.distanceTo(end);
+        double tipTravel = lastTipPosition.distanceTo(end);
+
+        if (whip.getCurrentState() == WhipEntity.WhipEntityState.RETRACTING) {
+            deployedLength = Math.max(endpointDistance, deployedLength - tipTravel);
+        } else {
+            deployedLength = Math.max(
+                    endpointDistance,
+                    Math.min(WhipEntity.MAX_REACH, deployedLength + tipTravel)
+            );
+        }
+        lastTipPosition = end;
 
         // Keep the endpoints attached to the player and whip.
         currentPositions.set(0, start);
         currentPositions.set(SEGMENTS, end);
 
         // Verlet integration: new position = current + damped velocity + acceleration.
+        double slack = Math.max(0.0, deployedLength - endpointDistance);
+        double gravityScale = deployedLength < 1.0E-8 ? 0.0 : Math.min(1.0, slack / deployedLength);
+        double restLength = Math.max(endpointDistance, deployedLength) / SEGMENTS;
+
         for (int i = 1; i < SEGMENTS; i++) {
             Vec3 current = currentPositions.get(i);
             Vec3 previous = previousPositions.get(i);
             Vec3 velocity = current.subtract(previous).scale(DAMPING);
 
             previousPositions.set(i, current);
-            currentPositions.set(i, current.add(velocity).add(0, -GRAVITY, 0));
+            currentPositions.set(i, current.add(velocity).add(0, -GRAVITY * gravityScale, 0));
         }
 
         // Keep endpoints fixed while enforcing segment lengths.
-        double restLength = start.distanceTo(end) / SEGMENTS;
-
         for (int iteration = 0; iteration < CONSTRAINT_ITERATIONS; iteration++) {
             currentPositions.set(0, start);
             currentPositions.set(SEGMENTS, end);
