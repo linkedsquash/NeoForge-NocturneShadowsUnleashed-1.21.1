@@ -1,0 +1,6 @@
+{
+  "parent": "minecraft:item/handheld",
+  "textures": {
+    "layer0": "nocturne:item/bloodstone_shovel"
+  }
+}
