@@ -20,6 +20,23 @@ import java.util.function.Supplier;
 public class ModBlocks {
     public static final DeferredRegister.Blocks BLOCKS =
             DeferredRegister.createBlocks(Nocturne.MOD_ID);
+    private static final BlockSetType IRON_SOUNDS_HAND_OPEN =
+            BlockSetType.register(new BlockSetType(
+                    "nocturne_iron_sounds_hand_open",
+                    true, // canOpenByHand
+                    BlockSetType.IRON.canOpenByWindCharge(),
+                    BlockSetType.IRON.canButtonBeActivatedByArrows(),
+                    BlockSetType.IRON.pressurePlateSensitivity(),
+                    BlockSetType.IRON.soundType(),
+                    BlockSetType.IRON.doorClose(),
+                    BlockSetType.IRON.doorOpen(),
+                    BlockSetType.IRON.trapdoorClose(),
+                    BlockSetType.IRON.trapdoorOpen(),
+                    BlockSetType.IRON.pressurePlateClickOff(),
+                    BlockSetType.IRON.pressurePlateClickOn(),
+                    BlockSetType.IRON.buttonClickOff(),
+                    BlockSetType.IRON.buttonClickOn()
+            ));
 
         // Register a block that copies the strength and other basic properties of a diamond block.
         public static final DeferredBlock<Block> BLOODSTONE_BLOCK = registerBlock("bloodstone_block",
@@ -42,12 +59,12 @@ public class ModBlocks {
 
     //redstone blocks
     public static final DeferredBlock<ButtonBlock> BLOODSTONE_BUTTON = registerBlock("bloodstone_button",
-            () -> new ButtonBlock( BlockSetType.OAK, 20,BlockBehaviour.Properties.of()
+            () -> new ButtonBlock( IRON_SOUNDS_HAND_OPEN, 20,BlockBehaviour.Properties.of()
                     .noCollission()
                     .sound(SoundType.METAL)
                     .strength(0.5F)));
     public static final DeferredBlock<PressurePlateBlock> BLOODSTONE_PRESSURE_PLATE = registerBlock("bloodstone_pressure_plate",
-            () -> new PressurePlateBlock(BlockSetType.IRON, BlockBehaviour.Properties.of()
+            () -> new PressurePlateBlock(IRON_SOUNDS_HAND_OPEN, BlockBehaviour.Properties.of()
                     .requiresCorrectToolForDrops()
                     .strength(0.5F)
                     .sound(SoundType.METAL)
