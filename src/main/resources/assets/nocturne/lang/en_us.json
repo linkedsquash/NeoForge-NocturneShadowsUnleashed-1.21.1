@@ -43,5 +43,6 @@
   "creativetab.nocturne_tab":"Nocturne",
   "key.categories.nocturne": "Nocturne",
   "key.nocturne.lash_key": "Lash",
-  "key.nocturne.sweep_key": "Sweep"
+  "key.nocturne.sweep_key": "Sweep",
+  "message.nocturne.whip_damage": "Whip damage: %s"
 }

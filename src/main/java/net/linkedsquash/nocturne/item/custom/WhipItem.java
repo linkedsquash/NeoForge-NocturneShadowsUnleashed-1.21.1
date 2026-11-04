@@ -32,35 +32,23 @@ public class WhipItem extends Item{
     //the return TYPE that tells Minecraft that it is for an item stack
     // Declares the use method and tells it to accept the Level, Player,and interaction hand as parameters,
     // Minecraft calls the use method when the whip is used
-    public @NotNull InteractionResultHolder<ItemStack> use(@NotNull Level level, Player player, @NotNull InteractionHand interactionHand){        //after this bracket is what the use method is told to do with the WhipItem,
-        ItemStack itemStack = player.getItemInHand(interactionHand);  // then it retrieves the item held in the interaction hand and stores it to apply the durability damage later
+    public @NotNull InteractionResultHolder<ItemStack> use(@NotNull Level level, Player player, @NotNull InteractionHand interactionHand) {
+        ItemStack itemStack = player.getItemInHand(interactionHand);
+        WhipEntity tip = WhipEntity.findActive(player);
 
-        WhipEntity tip = WhipEntity.findActive(player);        // It tells it to look for existing instances of Whip Entities and the dictates its behaviour accordingly
-        if (tip != null) //checks whether "tip" contains a reference to a Whip entity
-        {
-
-            if(!level.isClientSide){ // Checks that the code is running on the server side, so the entity removal and durability changes happen on the authoritative side.
-
-                tip.retrieve();
-                level.playSound(                //tells minecraft to play a sound based on what the if statement finds
-
-                        null,
-                        player.getX(),
-                        player.getY(),
-                        player.getZ(),
-                        SoundEvents.AMETHYST_BLOCK_BREAK,
-                        SoundSource.NEUTRAL,
-                        5.0F,
-                        0.4F / (level.getRandom().nextFloat() * 0.4F + 0.8F)
-                );
-                }
+        // An existing tip can be sent out again only while it is already returning.
+        if (tip != null && !tip.checkRETRACTING()) {
+            return InteractionResultHolder.fail(itemStack);
         }
-        else
-        {
-            if (!level.isClientSide){
-                // Use the vanilla sweep whoosh for the launch instead of the unrelated amethyst chime.
-                level.playSound(                //plays a different sound when the interaction is completed
 
+        if (!level.isClientSide) {
+            if (tip == null) {
+                level.addFreshEntity(new WhipEntity(player, level));
+            } else if (!tip.relaunch(player)) {
+                return InteractionResultHolder.fail(itemStack);
+            }
+
+            level.playSound(
                     null,
                     player.getX(),
                     player.getY(),
@@ -68,17 +56,12 @@ public class WhipItem extends Item{
                     SoundEvents.PLAYER_ATTACK_SWEEP,
                     SoundSource.PLAYERS,
                     0.8F,
-                    1.1F); // Adds the whip whoosh when the projectile is launched.
-
-                level.addFreshEntity(new WhipEntity(player ,level )); //The entity is constructed by new WhipEntity(player, level), and the world is then asked to add it. THIS IS WHERE THE WHIP ENTITY IS ACTUALLY CREATED
-            }
-
+                    1.1F
+            );
+            player.gameEvent(GameEvent.ITEM_INTERACT_FINISH);
         }
-        // Minecraft runs item-use code on both the client and server. Fire this event only on the server so it is not handled twice.
-        if (!level.isClientSide) {
-            player.gameEvent(GameEvent.ITEM_INTERACT_FINISH); // Notify Minecraft that the interaction has finished.
-        }
-        return  InteractionResultHolder.sidedSuccess(itemStack, level.isClientSide()); //The method returns an InteractionResultHolder to the code that called use()
+
+        return InteractionResultHolder.sidedSuccess(itemStack, level.isClientSide());
     }
 
     @Override

@@ -11,6 +11,7 @@ import net.minecraft.sounds.SoundSource;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.network.syncher.EntityDataSerializers;
 import net.minecraft.network.syncher.SynchedEntityData;
+import net.minecraft.network.chat.Component;
 import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.damagesource.DamageSource;
@@ -60,7 +61,7 @@ public class WhipEntity extends Projectile {
     private static final double SWEEP_ARRIVAL_SPEED_FACTOR = 0.75;
     // Vertical steering is gentler than horizontal steering so aim changes do not make the tip pop up or down.
     private static final double SWEEP_VERTICAL_ARRIVAL_SPEED_FACTOR = 0.2;
-    // Applied after movement, preserving the first launch step while bending later flight downward.
+    // Applied every tick while the tip is airborne, so the player must aim above a target.
     private static final double LASH_GRAVITY = 0.08;
     private static final double AIR_DRAG = 0.99;
     private static final double WATER_DRAG = 0.55;
@@ -173,6 +174,33 @@ public class WhipEntity extends Projectile {
 
     }
 
+    /** Sends a returning tip back out from its owner, reusing the existing entity. */
+    public boolean relaunch(Player player) {
+        if (this.level().isClientSide || this.isRemoved()
+                || this.getPlayerOwner() != player || !checkRETRACTING()) {
+            return false;
+        }
+
+        Vec3 lookDirection = player.getLookAngle();
+        Vec3 lookPosition = player.getEyePosition().add(lookDirection.scale(0.5));
+        this.moveTo(
+                lookPosition.x,
+                lookPosition.y - 0.5,
+                lookPosition.z,
+                player.getYRot(),
+                player.getXRot()
+        );
+        this.spawnPosition = this.position();
+        this.setDeltaMovement(lookDirection.scale(2.5));
+        this.entityData.set(DATA_SWEEPING, false);
+        this.lastSweepHitTick.clear();
+        this.previousSweepLookAngle = null;
+        this.previousSweepTargetPosition = null;
+        this.previousSweepTick = 0;
+        setCurrentState(WhipEntityState.EXTENDING);
+        return true;
+    }
+
         @Override
         protected void readAdditionalSaveData (CompoundTag tag){
             // Let the parent projectile restore its own saved data first.
@@ -204,12 +232,6 @@ public class WhipEntity extends Projectile {
                     tip -> tip.getOwner() == player); // Keep only tips owned by this player.
             return tips.isEmpty() ? null : tips.get(0); // Return null when none are found, otherwise return the first match.
 
-        }
-
-        // Immediately recalls the tip, preserving the original second-use behavior.
-        public int retrieve () {
-            this.discardWhip();
-            return 1;
         }
 
         public boolean mustRetractWhip (Player player)
@@ -291,24 +313,19 @@ public class WhipEntity extends Projectile {
                     this.move(MoverType.SELF, this.getDeltaMovement());
                 }
             } else {
-                if (dropping) {
-                    if (this.onGround()) {
-                        // Stop ground jitter, but keep DROPPING so a moved sweep aim can restart the tip.
-                        this.setDeltaMovement(Vec3.ZERO);
-                    } else {
-                        // A stopped airborne tip continues to fall until it lands.
-                        applyLashForces();
-                    }
+                boolean retracting = getCurrentState() == WhipEntityState.RETRACTING;
+                boolean freeLash = extending && !sweeping && getCurrentState() == WhipEntityState.EXTENDING;
+                if (dropping && this.onGround()) {
+                    // Stop ground jitter, but keep DROPPING so a moved sweep aim can restart the tip.
+                    this.setDeltaMovement(Vec3.ZERO);
+                } else if (!this.onGround() && (dropping || retracting || freeLash)) {
+                    // Apply gravity before movement during every airborne, non-guided flight phase.
+                    applyLashForces();
                 }
                 this.move(MoverType.SELF, this.getDeltaMovement()); // Move the tip using its current velocity.
             }
             if (getCurrentState() == WhipEntityState.DROPPING && this.onGround() && !guidedSweep) {
                 this.setDeltaMovement(Vec3.ZERO);
-            }
-
-            // Apply forces after movement so the launch step remains unchanged and later ticks form a projectile arc.
-            if (extending && !sweeping && getCurrentState() == WhipEntityState.EXTENDING) {
-                applyLashForces();
             }
 
             // Only enter the falling state after motion is nearly exhausted; moving the held sweep aim can revive it.
@@ -422,6 +439,7 @@ public class WhipEntity extends Projectile {
                 float damage = (float) (sweepDamage + (angularVelocity * 20));
                 if (target.hurt(damageSources().playerAttack(player), damage)) {
                     playHitFeedback(target);
+                    showDamageMessage(player, damage);
                     lastSweepHitTick.put(target.getUUID(), now);
                     damageWhip(player);
                 }
@@ -444,6 +462,7 @@ public class WhipEntity extends Projectile {
                 DamageSource damageSource = this.damageSources().playerAttack(playerOwner);
                 if (target.hurt(damageSource, damage)) {
                     playHitFeedback(target);
+                    showDamageMessage(playerOwner, damage);
                     damageWhip(playerOwner);
                 }
             } else {
@@ -501,6 +520,10 @@ public class WhipEntity extends Projectile {
                 0.15,
                 0.02
         );
+    }
+
+    private void showDamageMessage(Player player, float damage) {
+        player.displayClientMessage(Component.translatable("message.nocturne.whip_damage", damage), true);
     }
 
     private void damageWhip(Player player) {
