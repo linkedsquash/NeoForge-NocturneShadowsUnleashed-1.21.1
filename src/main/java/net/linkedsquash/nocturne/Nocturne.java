@@ -3,6 +3,7 @@ package net.linkedsquash.nocturne;
 import net.linkedsquash.nocturne.block.ModBlocks;
 import net.linkedsquash.nocturne.item.ModCreativeModeTabs;
 import net.linkedsquash.nocturne.item.ModItems;
+import net.linkedsquash.nocturne.network.packets.SweepAttackPacket;
 import net.linkedsquash.nocturne.world.entity.ModEntities;
 import org.slf4j.Logger;
 
@@ -29,6 +30,10 @@ public class Nocturne {
 
         modEventBus.addListener(this::commonSetup);
         NeoForge.EVENT_BUS.register(this);
+        NeoForge.EVENT_BUS.addListener(SweepAttackPacket::onPlayerLoggedOut);
+        NeoForge.EVENT_BUS.addListener(SweepAttackPacket::onPlayerRespawn);
+        NeoForge.EVENT_BUS.addListener(SweepAttackPacket::onPlayerChangedDimension);
+        NeoForge.EVENT_BUS.addListener(SweepAttackPacket::onPlayerTick);
 
         ModEntities.register(modEventBus);
         ModItems.register(modEventBus);

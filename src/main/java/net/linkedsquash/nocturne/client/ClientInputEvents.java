@@ -17,13 +17,13 @@ import net.neoforged.neoforge.network.PacketDistributor;
         value = Dist.CLIENT
 )
 public class ClientInputEvents {
-    public static boolean sweepPacketSent;
+    private static boolean chargePacketSent;
 
     @SubscribeEvent
     public static void onInteractionKey(InputEvent.InteractionKeyMappingTriggered event) {
         Minecraft minecraft = Minecraft.getInstance();
 
-        if (minecraft.player == null || minecraft.screen != null || !sweepPacketSent) {
+        if (minecraft.player == null || minecraft.screen != null || !chargePacketSent) {
             return;
         }
 
@@ -31,7 +31,8 @@ public class ClientInputEvents {
                 minecraft.player.getMainHandItem().is(ModTags.Items.WHIPS)
                         || minecraft.player.getOffhandItem().is(ModTags.Items.WHIPS);
 
-        if (holdingWhip && (event.isAttack() || event.isUseItem())) {
+        boolean chargeInputDown = chargePacketSent || ModKeyMapping.SWEEP_KEY.isDown();
+        if (holdingWhip && chargeInputDown && (event.isAttack() || event.isUseItem())) {
             event.setSwingHand(false);
             event.setCanceled(true);
         }
@@ -42,7 +43,7 @@ public class ClientInputEvents {
         Minecraft minecraft = Minecraft.getInstance();
 
         if (minecraft.player == null) {
-            sweepPacketSent = false;
+            chargePacketSent = false;
             return;
         }
 
@@ -50,18 +51,22 @@ public class ClientInputEvents {
                 minecraft.player.getMainHandItem().is(ModTags.Items.WHIPS)
                         || minecraft.player.getOffhandItem().is(ModTags.Items.WHIPS);
 
-        boolean shouldSweep =
+        boolean canCharge =
                 minecraft.screen == null
                         && minecraft.player.isAlive()
-                        && holdingWhip
-                        && ModKeyMapping.SWEEP_KEY.isDown();
+                        && !minecraft.player.isSpectator()
+                        && holdingWhip;
+        boolean shouldCharge = canCharge && ModKeyMapping.SWEEP_KEY.isDown();
 
-        if (shouldSweep && !sweepPacketSent) {
-            PacketDistributor.sendToServer(new SweepAttackPacket(SweepAttackPacket.Behavior.SWEEP)); // Ask the server to start the sweep behavior.
-            sweepPacketSent = true;
-        } else if (!shouldSweep && sweepPacketSent) {
-            PacketDistributor.sendToServer(new SweepAttackPacket(SweepAttackPacket.Behavior.RETRACT)); // Ask the server to retract when the key is released.
-            sweepPacketSent = false;
+        if (shouldCharge && !chargePacketSent) {
+            PacketDistributor.sendToServer(new SweepAttackPacket(SweepAttackPacket.Behavior.START_CHARGE));
+            chargePacketSent = true;
+        } else if (!shouldCharge && chargePacketSent) {
+            SweepAttackPacket.Behavior behavior = canCharge
+                    ? SweepAttackPacket.Behavior.RELEASE
+                    : SweepAttackPacket.Behavior.CANCEL;
+            PacketDistributor.sendToServer(new SweepAttackPacket(behavior));
+            chargePacketSent = false;
         }
     }
 }

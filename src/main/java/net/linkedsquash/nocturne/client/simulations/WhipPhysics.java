@@ -26,7 +26,7 @@ public class WhipPhysics {
         Vec3 start = getHandPosition();
         Vec3 end = whip.position();
         this.lastTipPosition = end;
-        this.deployedLength = Math.min(WhipEntity.MAX_REACH, start.distanceTo(end));
+        this.deployedLength = Math.min(whip.getSweepReach(), start.distanceTo(end));
 
         for (int i = 0; i <= SEGMENTS; i++) {
             double t = i / (double) SEGMENTS;
@@ -51,7 +51,7 @@ public class WhipPhysics {
         } else if (whip.getCurrentState() != WhipEntity.WhipEntityState.DROPPING) {
             deployedLength = Math.max(
                     endpointDistance,
-                    Math.min(WhipEntity.MAX_REACH, deployedLength + tipTravel)
+                    Math.min(whip.getSweepReach(), deployedLength + tipTravel)
             );
         } else {
             // A falling tip still has rope deployed, so preserve its slack until it begins retracting.

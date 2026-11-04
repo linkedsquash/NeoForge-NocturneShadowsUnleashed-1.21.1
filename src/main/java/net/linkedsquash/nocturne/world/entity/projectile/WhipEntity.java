@@ -49,6 +49,10 @@ public class WhipEntity extends Projectile {
     private static final EntityDataAccessor<Boolean> DATA_SWEEPING =
             SynchedEntityData.defineId(WhipEntity.class, EntityDataSerializers.BOOLEAN);
 
+    // The active reach is synchronized so the client rope simulation can pay out to a charged range.
+    private static final EntityDataAccessor<Float> DATA_SWEEP_REACH =
+            SynchedEntityData.defineId(WhipEntity.class, EntityDataSerializers.FLOAT);
+
     // Shared key used to synchronise the whip state between the server and client.
     private static final EntityDataAccessor<Integer> DATA_STATE =
             SynchedEntityData.defineId(WhipEntity.class, EntityDataSerializers.INT);
@@ -57,6 +61,10 @@ public class WhipEntity extends Projectile {
     private Vec3 spawnPosition = Vec3.ZERO;
     private static final int SWEEP_HIT_COOLDOWN = 20;
     private static final double SWEEP_MAX_SPEED = 2.5;
+    private static final double CHARGED_SWEEP_MAX_REACH = 16.0;
+    private static final double CHARGED_SWEEP_MAX_SPEED = 5.0;
+    private static final float CHARGED_SWEEP_MAX_DAMAGE = 12.0F;
+    private static final double CHARGED_SWEEP_ARRIVAL_DISTANCE = 0.75;
     private static final double SWEEP_ACCELERATION = 1.0;
     private static final double SWEEP_ARRIVAL_SPEED_FACTOR = 0.75;
     // Vertical steering is gentler than horizontal steering so aim changes do not make the tip pop up or down.
@@ -78,19 +86,14 @@ public class WhipEntity extends Projectile {
     @Nullable
     private Vec3 previousSweepTargetPosition;
     private long previousSweepTick;
+    @Nullable
+    private Vec3 chargedSweepTarget;
+    private double activeSweepReach = MAX_REACH;
+    private double activeSweepSpeed = SWEEP_MAX_SPEED;
+    private boolean chargedSweep;
 
     public float sweepDamage = 4F;
     public float lashDamage = 8F;
-
-
-    public double getSweepDamage() {
-        return this.sweepDamage;
-    }
-
-    public double getLashDamage() {
-        return this.lashDamage;
-    }
-
 
     // Constructor used by Minecraft when loading or creating this entity by type.
     public WhipEntity(EntityType<? extends WhipEntity> entityType, Level level) {
@@ -113,6 +116,10 @@ public class WhipEntity extends Projectile {
 
     private boolean isSweepHeld() {
         return this.entityData.get(DATA_SWEEPING);
+    }
+
+    public double getSweepReach() {
+        return this.entityData.get(DATA_SWEEP_REACH);
     }
 
     public boolean checkRETRACTING() {
@@ -193,12 +200,68 @@ public class WhipEntity extends Projectile {
         this.spawnPosition = this.position();
         this.setDeltaMovement(lookDirection.scale(2.5));
         this.entityData.set(DATA_SWEEPING, false);
+        this.entityData.set(DATA_SWEEP_REACH, (float) MAX_REACH);
+        this.chargedSweep = false;
+        this.chargedSweepTarget = null;
+        this.activeSweepReach = MAX_REACH;
+        this.activeSweepSpeed = SWEEP_MAX_SPEED;
         this.lastSweepHitTick.clear();
         this.previousSweepLookAngle = null;
         this.previousSweepTargetPosition = null;
         this.previousSweepTick = 0;
         setCurrentState(WhipEntityState.EXTENDING);
         return true;
+    }
+
+    /** Starts one finite sweep using the aim and charge captured at release. */
+    public void fireChargedSweep(Player player, Vec3 aimDirection, float chargeAmount, boolean reuseTipPosition) {
+        if (this.level().isClientSide || this.isRemoved() || this.getPlayerOwner() != player) return;
+
+        float charge = Mth.clamp(chargeAmount, 0.0F, 1.0F);
+        Vec3 direction = aimDirection.lengthSqr() < 1.0E-6
+                ? player.getLookAngle()
+                : aimDirection.normalize();
+        double reach = Mth.lerp(charge, (float) MAX_REACH, (float) CHARGED_SWEEP_MAX_REACH);
+        double speed = Mth.lerp(charge, SWEEP_MAX_SPEED, CHARGED_SWEEP_MAX_SPEED);
+        this.sweepDamage = Mth.lerp(charge, 4.0F, CHARGED_SWEEP_MAX_DAMAGE);
+        this.activeSweepReach = reach;
+        this.activeSweepSpeed = speed;
+        this.chargedSweep = true;
+
+        Vec3 launchPosition = player.getRopeHoldPosition(1.0F);
+        Vec3 tipStartPosition = reuseTipPosition ? this.position() : launchPosition;
+        this.setOwner(player);
+        this.moveTo(tipStartPosition.x, tipStartPosition.y, tipStartPosition.z, player.getYRot(), player.getXRot());
+        this.spawnPosition = launchPosition;
+        this.chargedSweepTarget = launchPosition.add(direction.scale(reach));
+        this.entityData.set(DATA_SWEEP_REACH, (float) reach);
+        this.entityData.set(DATA_SWEEPING, true);
+        this.lastSweepHitTick.clear();
+        this.previousSweepTargetPosition = this.chargedSweepTarget;
+        this.previousSweepLookAngle = player.getLookAngle();
+        this.previousSweepTick = this.level().getGameTime();
+        setCurrentState(WhipEntityState.EXTENDING);
+        this.setDeltaMovement(direction.scale(speed));
+
+        this.level().playSound(
+                null,
+                launchPosition.x,
+                launchPosition.y,
+                launchPosition.z,
+                SoundEvents.PLAYER_ATTACK_SWEEP,
+                SoundSource.PLAYERS,
+                0.8F,
+                Mth.lerp(charge, 0.9F, 1.5F)
+        );
+    }
+
+    private void finishChargedSweep() {
+        if (!this.chargedSweep) return;
+
+        this.chargedSweep = false;
+        this.chargedSweepTarget = null;
+        this.entityData.set(DATA_SWEEPING, false);
+        setCurrentState(WhipEntityState.RETRACTING);
     }
 
         @Override
@@ -264,7 +327,7 @@ public class WhipEntity extends Projectile {
 
         // Compare the player's current reach target with the previous one to detect renewed sweep input.
         private boolean hasSweepAimMoved(Player player) {
-            Vec3 targetPosition = player.getEyePosition().add(player.getLookAngle().scale(MAX_REACH));
+            Vec3 targetPosition = player.getEyePosition().add(player.getLookAngle().scale(getSweepReach()));
             if (previousSweepTargetPosition == null) {
                 previousSweepTargetPosition = targetPosition;
                 return false;
@@ -281,6 +344,7 @@ public class WhipEntity extends Projectile {
             // Register the state before getCurrentState() or setCurrentState() accesses it.
             builder.define(DATA_STATE, WhipEntityState.EXTENDING.ordinal());
             builder.define(DATA_SWEEPING, false);
+            builder.define(DATA_SWEEP_REACH, (float) MAX_REACH);
         }
 
         @Override
@@ -371,14 +435,16 @@ public class WhipEntity extends Projectile {
         /** Steers the tip toward the player's aim and damages entities intersected by its actual path. */
         private void updateSweep (Player player){
             Vec3 previousPosition = this.position();
-            Vec3 targetPosition = player.getEyePosition().add(player.getLookAngle().scale(MAX_REACH));
+            Vec3 targetPosition = chargedSweep && chargedSweepTarget != null
+                    ? chargedSweepTarget
+                    : player.getEyePosition().add(player.getLookAngle().scale(getSweepReach()));
             previousSweepTargetPosition = targetPosition;
             Vec3 toTarget = targetPosition.subtract(previousPosition);
             // Steer horizontally toward the live aim while using a lower vertical response for controlled arcs.
             Vec3 horizontalToTarget = new Vec3(toTarget.x, 0.0, toTarget.z);
             double horizontalDistance = horizontalToTarget.length();
             double horizontalSpeed = Math.min(
-                    SWEEP_MAX_SPEED,
+                    activeSweepSpeed,
                     horizontalDistance * SWEEP_ARRIVAL_SPEED_FACTOR
             );
             Vec3 horizontalVelocity = horizontalDistance < 1.0E-6
@@ -386,8 +452,8 @@ public class WhipEntity extends Projectile {
                     : horizontalToTarget.scale(horizontalSpeed / horizontalDistance);
             double verticalSpeed = Mth.clamp(
                     toTarget.y * SWEEP_VERTICAL_ARRIVAL_SPEED_FACTOR,
-                    -SWEEP_MAX_SPEED,
-                    SWEEP_MAX_SPEED
+                    -activeSweepSpeed,
+                    activeSweepSpeed
             );
             Vec3 desiredVelocity = new Vec3(horizontalVelocity.x, verticalSpeed, horizontalVelocity.z);
             Vec3 velocity = getDeltaMovement();
@@ -402,8 +468,8 @@ public class WhipEntity extends Projectile {
 
             // Gravity also bends the guided sweep; clamp afterward so steering and gravity respect the same speed cap.
             velocity = velocity.add(0.0, -LASH_GRAVITY, 0.0);
-            if (velocity.lengthSqr() > SWEEP_MAX_SPEED * SWEEP_MAX_SPEED) {
-                velocity = velocity.normalize().scale(SWEEP_MAX_SPEED);
+            if (velocity.lengthSqr() > activeSweepSpeed * activeSweepSpeed) {
+                velocity = velocity.normalize().scale(activeSweepSpeed);
             }
 
             setDeltaMovement(velocity);
@@ -423,6 +489,10 @@ public class WhipEntity extends Projectile {
             previousSweepLookAngle = currentLookAngle;
             previousSweepTick = now;
 
+            double tipTravelDistance = previousPosition.distanceTo(currentPosition);
+            float movementRatio = activeSweepSpeed <= 1.0E-6
+                    ? 0.0F
+                    : Mth.clamp((float) (tipTravelDistance / activeSweepSpeed), 0.0F, 1.0F);
             var searchBox = new net.minecraft.world.phys.AABB(previousPosition, currentPosition).inflate(1.0);
 
             // Test the tip's traveled segment. Per-UUID cooldowns prevent repeat hits without ending the sweep,
@@ -435,14 +505,21 @@ public class WhipEntity extends Projectile {
                 Long lastHit = lastSweepHitTick.get(target.getUUID());
                 if (lastHit != null && now - lastHit < SWEEP_HIT_COOLDOWN) continue;
 
-                Mth.clamp(sweepDamage, sweepDamage, 40F);
-                float damage = (float) (sweepDamage + (angularVelocity * 20));
+                float damage = (float) ((sweepDamage + (angularVelocity * 20)) * movementRatio);
                 if (target.hurt(damageSources().playerAttack(player), damage)) {
                     playHitFeedback(target);
                     showDamageMessage(player, damage);
                     lastSweepHitTick.put(target.getUUID(), now);
                     damageWhip(player);
                 }
+            }
+
+            if (chargedSweep && chargedSweepTarget != null
+                    && (previousPosition.distanceToSqr(this.position()) < 1.0E-6
+                    || this.position().distanceToSqr(chargedSweepTarget)
+                    <= CHARGED_SWEEP_ARRIVAL_DISTANCE * CHARGED_SWEEP_ARRIVAL_DISTANCE
+                    || this.position().distanceTo(spawnPosition) >= activeSweepReach - CHARGED_SWEEP_ARRIVAL_DISTANCE)) {
+                finishChargedSweep();
             }
         }
 
@@ -547,31 +624,6 @@ public class WhipEntity extends Projectile {
             this.remove(RemovalReason.DISCARDED);
             isDiscarded = true;
         }
-
-        public void startSweep () {
-            lastSweepHitTick.clear();
-            // Reset aim history so the new press starts cleanly, including when restarting from a dropped tip.
-            previousSweepTargetPosition = null;
-            this.entityData.set(DATA_SWEEPING, true);
-            setCurrentState(WhipEntityState.EXTENDING); // Keep the whip in its outbound state while sweeping.
-            // Play the same vanilla whoosh used for a normal lash when a held sweep begins.
-            this.level().playSound(
-                    null,
-                    this.getX(),
-                    this.getY(),
-                    this.getZ(),
-                    SoundEvents.PLAYER_ATTACK_SWEEP,
-                    SoundSource.PLAYERS,
-                    0.8F,
-                    1.1F
-            );
-        }
-
-        public void releaseSweep () {
-            this.entityData.set(DATA_SWEEPING, false);
-            setCurrentState(WhipEntityState.RETRACTING); // Tell the server-side entity to return to its owner.
-        }
-
 
         public enum WhipEntityState { // The three movement states used by the whip tip.
             // The tip is travelling away from the player.
